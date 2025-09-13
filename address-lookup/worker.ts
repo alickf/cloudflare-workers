@@ -10,16 +10,16 @@
  */
 
 export interface Env {
-  OS_PLACES_KEY: string; // injected via Wrangler secrets
-  LOOKUP_CACHE?: KVNamespace; // optional KV cache binding (test/prod)
+  OS_PLACES_KEY: string;
   DEBUG_LOGS?: string;
   DEBUG_MODE?: string;
+  EDGE_TTL_SECONDS?: string;    // so env.EDGE_TTL_SECONDS types cleanly
 }
 
 /*───────────────────────────────────────────────────────────────────────────
  * 1) Allow-list (embedded) + fast matchers
  *    - Wildcards use a trailing '*' (e.g. "CI*")
- *    - Exact codes are literals (e.g. "CI03")
+ *    - Exact codes are literals (e.g. "CC02")
  *    - Compiled once per isolate and reused
  *───────────────────────────────────────────────────────────────────────────*/
 
@@ -167,7 +167,6 @@ function codeAllowed(code?: string): boolean {
 /*───────────────────────────────────────────────────────────────────────────
  * 1b) Abstract property type resolver (Business / Residential / Other)
  *     - Based on leading code family with a few explicit subfamilies
- *     - Can be extended from the spreadsheet if you add more rows
  *───────────────────────────────────────────────────────────────────────────*/
 type LSBType = 'BUSINESS' | 'RESIDENTIAL' | 'OTHER';
 
@@ -231,7 +230,7 @@ type SlimLPI = {
   ADMINISTRATIVE_AREA?: string;
   POSTCODE_LOCATOR?: string;
   CLASSIFICATION_CODE?: string;
-  LSB_PROPERTY_TYPE?: LSBType;   // preferred spelling
+  LSB_PROPERTY_TYPE?: LSBType; //Add property type from Hossein's lookup
 };
 
 type SlimDPA = {
@@ -245,7 +244,7 @@ type SlimDPA = {
   POST_TOWN?: string;
   POSTCODE?: string;
   CLASSIFICATION_CODE?: string;
-  LSB_PROPERTY_TYPE?: LSBType;   // preferred spelling
+  LSB_PROPERTY_TYPE?: LSBType;   //Add property type from Hossein's lookup
 };
 
 function projectLPI(lpi: any): SlimLPI {
@@ -264,7 +263,7 @@ function projectLPI(lpi: any): SlimLPI {
     ADMINISTRATIVE_AREA: lpi.ADMINISTRATIVE_AREA,
     POSTCODE_LOCATOR: lpi.POSTCODE_LOCATOR,
     CLASSIFICATION_CODE: lpi.CLASSIFICATION_CODE,
-    LSB_PROPERTY_TYPE: _type
+    LSB_PROPERTY_TYPE: _type //Add property type from Hossein's lookup
   };
 }
 
@@ -281,8 +280,7 @@ function projectDPA(dpa: any): SlimDPA {
     POST_TOWN: dpa.POST_TOWN,
     POSTCODE: dpa.POSTCODE,
     CLASSIFICATION_CODE: dpa.CLASSIFICATION_CODE,
-    LSB_PROPERTY_TYPE: _type,
-    LSB_PROPRTY_TYPE: _type
+    LSB_PROPERTY_TYPE: _type //Add property type from Hossein's lookup
   };
 }
 
@@ -294,10 +292,22 @@ function normalisePostcode(pc: string): string {
   return pc.toUpperCase().replace(/\s+/g, '');
 }
 
-function json(obj: unknown, status = 200): Response {
+function corsHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    'access-control-allow-origin': '*',
+    // Let browsers read these custom headers in fetch/XHR
+    'access-control-expose-headers': 'x-edge-cache, x-allowlist-hash, cf-ray, server-timing',
+    ...(extra || {})
+  };
+}
+
+function json(obj: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8' }
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...corsHeaders(extraHeaders)
+    }
   });
 }
 
@@ -306,12 +316,40 @@ async function safeText(r: Response): Promise<string | undefined> {
 }
 
 /*───────────────────────────────────────────────────────────────────────────
+ * 2a) Validation + timing + robust fetch
+ *───────────────────────────────────────────────────────────────────────────*/
+// Normalised (no-space, upper) UK postcode pattern (incl. GIR0AA)
+const PC_RE = /^(GIR0AA|[A-Z]{1,2}\d[A-Z\d]?\d[A-Z]{2})$/;
+
+// Simple phase timing helpers for Server-Timing
+function newTiming() {
+  const t0 = Date.now();
+  const parts: string[] = [];
+  return {
+    t0,
+    mark(name: string, start: number) { parts.push(`${name};dur=${Date.now() - start}`); },
+    header() { return parts.join(', '); }
+  };
+}
+
+// Upstream fetch with timeout (retry logic at callsite)
+async function fetchWithTimeout(url: string, ms = 2500): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort('timeout'), ms);
+  try {
+    return await fetch(url, { method: 'GET', signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/*───────────────────────────────────────────────────────────────────────────
  * 3) Build OS Places URL
  *    - Adds safe “quality” filters (live/approved records)
  *    - We filter classifications at the edge (no OR/wildcard pitfalls upstream)
  *───────────────────────────────────────────────────────────────────────────*/
 
-function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string): string {
+function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string, postalOnly: boolean): string {
   const u = new URL('https://api.os.uk/search/places/v1/postcode');
   u.searchParams.set('key', key);
   u.searchParams.set('postcode', pc);
@@ -321,8 +359,9 @@ function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string)
   // Quality filters (safe ANDs):
   u.searchParams.append('fq', 'LOGICAL_STATUS_CODE:1');
   if (dataset === 'LPI') u.searchParams.append('fq', 'LPI_LOGICAL_STATUS_CODE:1');
-  // Optional: only postal-ish rows
-  // u.searchParams.append('fq', 'POSTAL_ADDRESS_CODE:(D L)');
+
+  // Optional: only postal-ish rows when requested (D and L are postal)
+  if (dataset === 'LPI' && postalOnly) u.searchParams.append('fq', 'POSTAL_ADDRESS_CODE:(D L)');
 
   return u.toString();
 }
@@ -334,6 +373,17 @@ function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string)
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     try {
+      // CORS preflight
+      if (req.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders({
+            'access-control-allow-methods': 'GET,OPTIONS',
+            'access-control-allow-headers': 'content-type,x-cloudflare-bypass'
+          })
+        });
+      }
+
       // 4a) Secret present? Fail early if missing/blank (easier for maintainers)
       if (!env?.OS_PLACES_KEY || !env.OS_PLACES_KEY.trim()) {
         return json({
@@ -347,44 +397,100 @@ export default {
       const pcParam = url.searchParams.get('pc') || '';
       if (!pcParam) return json({ error: 'bad_request', message: 'pc (postcode) is required.' }, 400);
 
+      // Start timing aggregation for Server-Timing
+      const timing = newTiming();
+
       const postcode = normalisePostcode(pcParam);
+      // Strict postcode validation (normalised form)
+      if (!PC_RE.test(postcode)) {
+        return json({ error: 'bad_postcode', message: 'Invalid UK postcode format.' }, 400);
+      }
       const dataset = (url.searchParams.get('dataset') || 'LPI').toUpperCase();
       const max = url.searchParams.get('maxresults') || '100';
 
       const raw = url.searchParams.get('raw') === '1';
       const skipcache = url.searchParams.get('skipcache') === '1';
+      const postalOnly = url.searchParams.get('postal') === '1'; // optional upstream narrowing
 
-      // 4c) Upstream call (with optional KV cache)
+      // Edge cache key derived from normalised inputs + allow-list hash
+      const _allowHash = (() => {
+        try {
+          const s = ALLOW_LIST.join('|').toUpperCase();
+          let h = 0;
+          for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+          return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+        } catch { return 'na'; }
+      })();
+
+      const cacheKeyUrl = new URL(req.url);
+      // Canonicalise path so /api/address-lookup and /api/address-lookup/ hit the same key
+      if (!cacheKeyUrl.pathname.endsWith('/')) {
+        cacheKeyUrl.pathname += '/';
+      }
+      cacheKeyUrl.searchParams.set('pc', postcode);       // normalised
+      cacheKeyUrl.searchParams.set('dataset', dataset);
+      cacheKeyUrl.searchParams.set('maxresults', max);
+      cacheKeyUrl.searchParams.set('v', _allowHash);      // auto-bust on allow-list change
+
+      const shouldBypassEdgeCache = raw || skipcache;
+
+      // If present at the edge, return immediately (before any upstream work)
+      if (!shouldBypassEdgeCache) {
+        const edgeHit = await caches.default.match(cacheKeyUrl.toString(), { ignoreMethod: true });
+        if (edgeHit) {
+          const hitHeaders = Object.fromEntries(edgeHit.headers);
+          return new Response(edgeHit.body, {
+            status: 200,
+            headers: corsHeaders({
+              ...hitHeaders,
+              'x-edge-cache': 'HIT',
+              'x-allowlist-hash': _allowHash,
+              'server-timing': timing.header()
+            })
+          });
+        }
+      }
+
+      // 4c) Upstream call (no client headers forwarded)
       // Do not forward client headers to OS; perform a clean GET request
-      const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max);
+      const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max, postalOnly);
 
-      // KV cache key (normalised PC, dataset, max)
-      const _osKey = `os:v1:${dataset}:${postcode}:mr=${max}`;
-      let cacheState: 'HIT' | 'MISS' | 'BYPASS' = skipcache ? 'BYPASS' : 'MISS';
       let res: Response | undefined;
       let upstreamText: string | undefined;
       let upstreamJson: any | undefined;
 
-      // Try KV if bound and not bypassed
-      if (env.LOOKUP_CACHE && !skipcache) {
-        const cached = await env.LOOKUP_CACHE.get(_osKey);
-        if (cached) {
-          try {
-            upstreamJson = JSON.parse(cached);
-            cacheState = 'HIT';
-            if (env.DEBUG_LOGS === 'true') console.log(`KV HIT ${_osKey}`);
-          } catch {
-            // fall through to fetch
-          }
-        }
-      }
 
       if (!upstreamJson) {
-        res = await fetch(upstreamUrl, { method: 'GET' });
+        // Upstream fetch with timeout and one retry for transient issues
+        const tOs = Date.now();
+        res = await fetchWithTimeout(upstreamUrl, 2500).catch(() => undefined);
+        if (!res) res = await fetchWithTimeout(upstreamUrl, 2500).catch(() => undefined);
+        timing.mark('os', tOs);
+
+        if (!res) {
+          // Try to serve a stale cached edge response if available
+          const stale = await caches.default.match(cacheKeyUrl.toString(), { ignoreMethod: true });
+          if (stale) {
+            const sh = Object.fromEntries(stale.headers);
+            return new Response(stale.body, {
+              status: 200,
+              headers: corsHeaders({ ...sh, 'x-edge-cache': 'STALE', 'x-allowlist-hash': _allowHash, 'server-timing': timing.header() })
+            });
+          }
+          return json({ error: 'os_timeout', message: 'OS Places timed out.' }, 504);
+        }
 
         // 4d) Friendly auth errors from OS (bad/absent key, revoked key, etc.)
         if (res.status === 401 || res.status === 403) {
           const detail = await safeText(res);
+          const stale = await caches.default.match(cacheKeyUrl.toString(), { ignoreMethod: true });
+          if (stale) {
+            const sh = Object.fromEntries(stale.headers);
+            return new Response(stale.body, {
+              status: 200,
+              headers: corsHeaders({ ...sh, 'x-edge-cache': 'STALE', 'x-allowlist-hash': _allowHash, 'server-timing': timing.header() })
+            });
+          }
           return json({
             error: 'os_auth_failed',
             message: 'OS Places rejected the request (check OS_PLACES_KEY or API plan).',
@@ -396,6 +502,14 @@ export default {
         // 4e) Other upstream failures
         if (!res.ok) {
           const detail = await safeText(res);
+          const stale = await caches.default.match(cacheKeyUrl.toString(), { ignoreMethod: true });
+          if (stale) {
+            const sh = Object.fromEntries(stale.headers);
+            return new Response(stale.body, {
+              status: 200,
+              headers: corsHeaders({ ...sh, 'x-edge-cache': 'STALE', 'x-allowlist-hash': _allowHash, 'server-timing': timing.header() })
+            });
+          }
           return json({
             error: 'os_upstream_error',
             message: `OS Places responded with ${res.status}.`,
@@ -415,11 +529,6 @@ export default {
           }, 502);
         }
 
-        // Put into KV unless bypassed
-        if (env.LOOKUP_CACHE && !skipcache && upstreamText) {
-          await env.LOOKUP_CACHE.put(_osKey, upstreamText, { expirationTtl: 86400 });
-          if (env.DEBUG_LOGS === 'true') console.log(`KV PUT ${_osKey}`);
-        }
       }
 
       // raw=1 passthrough (use cached JSON if present, otherwise the fresh text)
@@ -427,10 +536,10 @@ export default {
         const txt = upstreamText ?? JSON.stringify(upstreamJson);
         return new Response(txt, {
           status: 200,
-          headers: {
+          headers: corsHeaders({
             'content-type': 'application/json; charset=utf-8',
-            'x-cache': cacheState
-          }
+            'server-timing': timing.header()
+          })
         });
       }
 
@@ -455,26 +564,31 @@ export default {
           .filter(Boolean)
           .map(projectDPA);
       }
+      const tFilt = Date.now();
+      timing.mark('filter', tFilt);
 
-      // 4h) Return compact payload; preserve header but correct count
-      return new Response(JSON.stringify({
-        header: { ...(body?.header || {}), totalresults: projected.length },
-        results: projected
-      }), {
-        headers: {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'public, max-age=120',
-          'x-cache': cacheState,
-          'x-allowlist-hash': (() => {
-            try {
-              const s = ALLOW_LIST.join('|').toUpperCase();
-              let h = 0;
-              for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-              return ('00000000' + (h >>> 0).toString(16)).slice(-8);
-            } catch { return 'na'; }
-          })()
-        }
-      });
+    // 4h) Return compact payload; also store at the edge with s-maxage TTL
+    const edgeTTL = Number(env?.EDGE_TTL_SECONDS || (env?.DEBUG_MODE === 'true' ? '60' : '864000')); // 60s test, 10d prod
+    const fresh = new Response(JSON.stringify({
+      header: { ...(body?.header || {}), totalresults: projected.length },
+      results: projected
+    }), {
+      headers: corsHeaders({
+        'content-type': 'application/json; charset=utf-8',
+        // NOTE: s-maxage controls Cloudflare cache; browsers still see no-store unless you add max-age
+        'cache-control': `public, max-age=0, s-maxage=${isFinite(edgeTTL) && edgeTTL > 0 ? edgeTTL : 60}`,
+        'x-edge-cache': 'MISS',             // explicit edge cache status for first response
+        'x-allowlist-hash': _allowHash,     // helps verify deploy/allow-list version
+        'server-timing': timing.header()
+      })
+    });
+
+    // Only cache successful responses at the edge and only when not bypassing
+    if (!shouldBypassEdgeCache && fresh.ok) {
+      await caches.default.put(cacheKeyUrl.toString(), fresh.clone());
+    }
+
+    return fresh;
 
     } catch (err: any) {
       return json({

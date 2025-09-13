@@ -2,8 +2,8 @@
  * For more details on how to configure Wrangler, refer to:
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  */
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
+ {
+  "$schema": "https://unpkg.com/wrangler@4.36.0/config-schema.json",
   "name": "address-lookup",
   "main": "worker.ts",
   "compatibility_date": "2025-07-26",
@@ -23,13 +23,15 @@
       "route": "api-test.lightspeed.co.uk/api/address-lookup/*",
       "vars": {
         "DEBUG_LOGS": "true",
-        "DEBUG_MODE": "true"
+        "DEBUG_MODE": "true",
+        "EDGE_TTL_SECONDS": "60"
       }
     },
     "production": {
       "route": "api.lightspeed.co.uk/api/address-lookup/*",
       "vars": {
-        "DEBUG_MODE": "false"
+        "DEBUG_MODE": "false",
+        "EDGE_TTL_SECONDS": "864000" // 10 days
       }
     }
   },
@@ -37,7 +39,7 @@
    * Smart Placement
    * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
    */
-   "placement": { "mode": "smart" },
+   "placement": { "mode": "smart" }
 
   /**
    * Bindings
