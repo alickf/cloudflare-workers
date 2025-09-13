@@ -1,0 +1,72 @@
+prefix,collapsed,emitted,yes_count,skip_count
+C,wildcard,C*,1,0
+CA,wildcard,CA*,12,0
+CB,exact-list,,0,1
+CC,exact-list,CC CC02 CC03 CC03HD CC03PR CC03SC CC04 CC04YR CC07 CC08 CC09 CC10 CC12,13,9
+CE,wildcard,CE*,18,0
+CH,wildcard,CH*,5,0
+CI,wildcard,CI*,44,0
+CL,exact-list,CL CL01 CL01LP CL02 CL02HA CL02HO CL02YC CL03 CL03RR CL04 CL04AC CL04AM CL04HG CL04IM CL04MM CL04NM CL04SM CL04TM CL06 CL06LS CL07 CL07CI CL07EN CL07EX CL07TH CL08 CL08AK CL08AQ CL08MX CL08WZ CL10 CL10RE CL11 CL11SD,34,33
+CM,wildcard,CM*,11,0
+CN,wildcard,CN*,11,0
+CO,wildcard,CO*,7,0
+CR,exact-list,CR CR01 CR02 CR02PO CR04 CR04FK CR04FV CR04LV CR05 CR06 CR07 CR08 CR08GC CR09 CR10,15,1
+CS,exact-list,,0,3
+CT,exact-list,CT01AP CT01AY CT01HS CT01HT CT04 CT04AE,6,41
+CU,exact-list,CU04WM CU06 CU06TE CU06TX CU10 CU12,6,27
+CX,exact-list,CX CX01 CX01PT CX02 CX02FT CX03 CX03AA CX04 CX06,9,3
+CZ,exact-list,,0,5
+L,exact-list,,0,1
+LA,exact-list,,0,4
+LB,exact-list,,0,5
+LC,exact-list,,0,2
+LD,exact-list,,0,6
+LF,exact-list,,0,4
+LL,exact-list,,0,1
+LM,exact-list,,0,9
+LO,exact-list,,0,2
+LP,exact-list,,0,7
+LU,exact-list,,0,2
+LW,exact-list,,0,11
+M,wildcard,M*,1,0
+MA,exact-list,MA MA99AR MA99AS MA99AT,4,1
+MB,wildcard,MB*,2,0
+MF,exact-list,MF MF99UR MF99US MF99UT,4,1
+MG,wildcard,MG*,1,0
+MN,exact-list,MN MN99VR MN99VS MN99VT,4,1
+O,exact-list,,0,1
+OA,exact-list,,0,12
+OC,exact-list,,0,5
+OE,exact-list,,0,7
+OF,exact-list,,0,1
+OG,exact-list,,0,5
+OH,exact-list,,0,2
+OI,exact-list,,0,16
+ON,exact-list,,0,4
+OO,exact-list,,0,4
+OP,exact-list,,0,4
+OR,exact-list,,0,5
+OS,exact-list,,0,4
+OT,exact-list,,0,28
+OU,exact-list,,0,5
+P,exact-list,,0,1
+PP,exact-list,,0,1
+PS,exact-list,,0,1
+R,wildcard,R*,1,0
+RB,exact-list,,0,1
+RC,exact-list,,0,2
+RD,exact-list,RD RD02 RD03 RD04 RD06 RD08,6,3
+RG,exact-list,,0,2
+RH,wildcard,RH*,4,0
+RI,wildcard,RI*,6,0
+U,exact-list,,0,1
+UC,exact-list,,0,1
+UP,exact-list,,0,1
+X,exact-list,,0,1
+Z,exact-list,,0,1
+ZA,exact-list,,0,1
+ZM,exact-list,,0,12
+ZS,exact-list,,0,1
+ZU,exact-list,,0,3
+ZV,exact-list,,0,9
+ZW,exact-list,ZW ZW99AB ZW99CA ZW99CH ZW99CP ZW99GU ZW99KH ZW99MQ ZW99MT ZW99SU ZW99SY ZW99TP,12,1
