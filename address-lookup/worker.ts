@@ -11,6 +11,9 @@
 
 export interface Env {
   OS_PLACES_KEY: string; // injected via Wrangler secrets
+  LOOKUP_CACHE?: KVNamespace; // optional KV cache binding (test/prod)
+  DEBUG_LOGS?: string;
+  DEBUG_MODE?: string;
 }
 
 /*───────────────────────────────────────────────────────────────────────────
@@ -210,6 +213,80 @@ function resolvePropertyType(code?: string): LSBType {
 }
 
 /*───────────────────────────────────────────────────────────────────────────
+ * 2b) Projectors (return only fields we need to minimise payload)
+ *     - LPI: keep core address + PAO/SAO numerics/text as available
+ *     - DPA: map to a similar slim shape
+ *───────────────────────────────────────────────────────────────────────────*/
+type SlimLPI = {
+  UPRN?: string;
+  ADDRESS?: string;
+  //USRN?: string;
+  //LPI_KEY?: string;
+  PAO_TEXT?: string;
+  SAO_TEXT?: string;
+  PAO_START_NUMBER?: string;
+  PAO_END_NUMBER?: string;
+  STREET_DESCRIPTION?: string;
+  TOWN_NAME?: string;
+  ADMINISTRATIVE_AREA?: string;
+  POSTCODE_LOCATOR?: string;
+  CLASSIFICATION_CODE?: string;
+  LSB_PROPERTY_TYPE?: LSBType;   // preferred spelling
+};
+
+type SlimDPA = {
+  UPRN?: string;
+  ADDRESS?: string;
+  ORGANISATION_NAME?: string;
+  BUILDING_NAME?: string;
+  SUB_BUILDING_NAME?: string;
+  BUILDING_NUMBER?: string;
+  THOROUGHFARE_NAME?: string;
+  POST_TOWN?: string;
+  POSTCODE?: string;
+  CLASSIFICATION_CODE?: string;
+  LSB_PROPERTY_TYPE?: LSBType;   // preferred spelling
+};
+
+function projectLPI(lpi: any): SlimLPI {
+  const _type = resolvePropertyType(lpi.CLASSIFICATION_CODE);
+  return {
+    UPRN: lpi.UPRN,
+    ADDRESS: lpi.ADDRESS,
+  //  USRN: lpi.USRN,
+  //  LPI_KEY: lpi.LPI_KEY,
+    PAO_TEXT: lpi.PAO_TEXT,
+    SAO_TEXT: lpi.SAO_TEXT,
+    PAO_START_NUMBER: lpi.PAO_START_NUMBER,
+    PAO_END_NUMBER: lpi.PAO_END_NUMBER,
+    STREET_DESCRIPTION: lpi.STREET_DESCRIPTION,
+    TOWN_NAME: lpi.TOWN_NAME,
+    ADMINISTRATIVE_AREA: lpi.ADMINISTRATIVE_AREA,
+    POSTCODE_LOCATOR: lpi.POSTCODE_LOCATOR,
+    CLASSIFICATION_CODE: lpi.CLASSIFICATION_CODE,
+    LSB_PROPERTY_TYPE: _type
+  };
+}
+
+function projectDPA(dpa: any): SlimDPA {
+  const _type = resolvePropertyType(dpa.CLASSIFICATION_CODE);
+  return {
+    UPRN: dpa.UPRN,
+    ADDRESS: dpa.ADDRESS,
+    ORGANISATION_NAME: dpa.ORGANISATION_NAME,
+    BUILDING_NAME: dpa.BUILDING_NAME,
+    SUB_BUILDING_NAME: dpa.SUB_BUILDING_NAME,
+    BUILDING_NUMBER: dpa.BUILDING_NUMBER,
+    THOROUGHFARE_NAME: dpa.THOROUGHFARE_NAME,
+    POST_TOWN: dpa.POST_TOWN,
+    POSTCODE: dpa.POSTCODE,
+    CLASSIFICATION_CODE: dpa.CLASSIFICATION_CODE,
+    LSB_PROPERTY_TYPE: _type,
+    LSB_PROPRTY_TYPE: _type
+  };
+}
+
+/*───────────────────────────────────────────────────────────────────────────
  * 2) Helpers (normalise, JSON responses, safe text)
  *───────────────────────────────────────────────────────────────────────────*/
 
@@ -274,77 +351,128 @@ export default {
       const dataset = (url.searchParams.get('dataset') || 'LPI').toUpperCase();
       const max = url.searchParams.get('maxresults') || '100';
 
-      // 4c) Upstream call
+      const raw = url.searchParams.get('raw') === '1';
+      const skipcache = url.searchParams.get('skipcache') === '1';
+
+      // 4c) Upstream call (with optional KV cache)
       // Do not forward client headers to OS; perform a clean GET request
       const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max);
-      const res = await fetch(upstreamUrl, { method: 'GET' });
 
-      // 4d) Friendly auth errors from OS (bad/absent key, revoked key, etc.)
-      if (res.status === 401 || res.status === 403) {
-        const detail = await safeText(res);
-        return json({
-          error: 'os_auth_failed',
-          message: 'OS Places rejected the request (check OS_PLACES_KEY or API plan).',
-          status: res.status,
-          detail
-        }, 502);
+      // KV cache key (normalised PC, dataset, max)
+      const _osKey = `os:v1:${dataset}:${postcode}:mr=${max}`;
+      let cacheState: 'HIT' | 'MISS' | 'BYPASS' = skipcache ? 'BYPASS' : 'MISS';
+      let res: Response | undefined;
+      let upstreamText: string | undefined;
+      let upstreamJson: any | undefined;
+
+      // Try KV if bound and not bypassed
+      if (env.LOOKUP_CACHE && !skipcache) {
+        const cached = await env.LOOKUP_CACHE.get(_osKey);
+        if (cached) {
+          try {
+            upstreamJson = JSON.parse(cached);
+            cacheState = 'HIT';
+            if (env.DEBUG_LOGS === 'true') console.log(`KV HIT ${_osKey}`);
+          } catch {
+            // fall through to fetch
+          }
+        }
       }
 
-      // 4e) Other upstream failures
-      if (!res.ok) {
-        const detail = await safeText(res);
-        return json({
-          error: 'os_upstream_error',
-          message: `OS Places responded with ${res.status}.`,
-          status: res.status,
-          detail
-        }, 502);
+      if (!upstreamJson) {
+        res = await fetch(upstreamUrl, { method: 'GET' });
+
+        // 4d) Friendly auth errors from OS (bad/absent key, revoked key, etc.)
+        if (res.status === 401 || res.status === 403) {
+          const detail = await safeText(res);
+          return json({
+            error: 'os_auth_failed',
+            message: 'OS Places rejected the request (check OS_PLACES_KEY or API plan).',
+            status: res.status,
+            detail
+          }, 502);
+        }
+
+        // 4e) Other upstream failures
+        if (!res.ok) {
+          const detail = await safeText(res);
+          return json({
+            error: 'os_upstream_error',
+            message: `OS Places responded with ${res.status}.`,
+            status: res.status,
+            detail
+          }, 502);
+        }
+
+        upstreamText = await res.text();
+        try {
+          upstreamJson = JSON.parse(upstreamText);
+        } catch (e) {
+          return json({
+            error: 'os_parse_error',
+            message: 'Failed to parse OS Places response.',
+            detail: String((e as Error).message || e)
+          }, 502);
+        }
+
+        // Put into KV unless bypassed
+        if (env.LOOKUP_CACHE && !skipcache && upstreamText) {
+          await env.LOOKUP_CACHE.put(_osKey, upstreamText, { expirationTtl: 86400 });
+          if (env.DEBUG_LOGS === 'true') console.log(`KV PUT ${_osKey}`);
+        }
+      }
+
+      // raw=1 passthrough (use cached JSON if present, otherwise the fresh text)
+      if (raw) {
+        const txt = upstreamText ?? JSON.stringify(upstreamJson);
+        return new Response(txt, {
+          status: 200,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'x-cache': cacheState
+          }
+        });
       }
 
       // 4f) Parse + filter
-      const body = await res.json();
+      const body = upstreamJson;
       const results = Array.isArray(body?.results) ? body.results : [];
       const filtered = results.filter((row: any) => {
         const rec = row?.LPI ?? row?.DPA ?? row;
         return codeAllowed(rec?.CLASSIFICATION_CODE);
       });
 
-      // 4g) Augment with abstract property type for each record
-      const augmented = filtered.map((row: any) => {
-        if (row?.LPI) {
-          const lpi = row.LPI;
-          return { 
-            LPI: { 
-              ...lpi, 
-              LSB_PROPERTY_TYPE: resolvePropertyType(lpi.CLASSIFICATION_CODE) 
-            } 
-          };
-        }
-        if (row?.DPA) {
-          const dpa = row.DPA;
-          return { 
-            DPA: { 
-              ...dpa, 
-              LSB_PROPERTY_TYPE: resolvePropertyType(dpa.CLASSIFICATION_CODE) 
-            } 
-          };
-        }
-        // Fallback: attach to the root if shape is unexpected
-        const rec = row || {};
-        return { 
-          ...rec, 
-          LSB_PROPERTY_TYPE: resolvePropertyType(rec.CLASSIFICATION_CODE) 
-        };
-      });
+      // 4g) Project to slim shape to minimise payload size
+      let projected: Array<any>;
+      if (dataset === 'LPI') {
+        projected = filtered
+          .map((row: any) => row?.LPI)
+          .filter(Boolean)
+          .map(projectLPI);
+      } else {
+        projected = filtered
+          .map((row: any) => row?.DPA)
+          .filter(Boolean)
+          .map(projectDPA);
+      }
 
       // 4h) Return compact payload; preserve header but correct count
       return new Response(JSON.stringify({
-        header: { ...(body?.header || {}), totalresults: augmented.length },
-        results: augmented
+        header: { ...(body?.header || {}), totalresults: projected.length },
+        results: projected
       }), {
         headers: {
           'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'public, max-age=120'
+          'cache-control': 'public, max-age=120',
+          'x-cache': cacheState,
+          'x-allowlist-hash': (() => {
+            try {
+              const s = ALLOW_LIST.join('|').toUpperCase();
+              let h = 0;
+              for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+              return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+            } catch { return 'na'; }
+          })()
         }
       });
 
