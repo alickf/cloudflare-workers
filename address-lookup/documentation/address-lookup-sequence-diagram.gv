@@ -1,0 +1,18 @@
+digraph sequence {
+	rankdir=LR splines=polyline
+	Client [shape=box]
+	"Cloudflare Edge" [shape=box]
+	"Route Matcher" [shape=box]
+	Worker [shape=box]
+	"OS Places API" [shape=box]
+	Client -> "Cloudflare Edge" [label="HTTPS request"]
+	"Cloudflare Edge" -> "Route Matcher" [label="Route match (/api/address-lookup/*)"]
+	"Route Matcher" -> Worker [label="Invoke Worker"]
+	Worker -> "Cloudflare Edge" [label="Check edge cache (caches.default.match)"]
+	"Cloudflare Edge" -> Worker [label="HIT? -> return cached"]
+	Worker -> "OS Places API" [label="fetchWithTimeout(url, 2500ms)"]
+	"OS Places API" -> Worker [label="Response (200/401/403/Other)"]
+	Worker -> "Cloudflare Edge" [label="Cache fresh response (caches.default.put)"]
+	Worker -> Client [label="Return JSON (filtered/projected)
++ headers (x-edge-cache, server-timing, etc.)"]
+}

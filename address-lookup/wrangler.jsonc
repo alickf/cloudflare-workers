@@ -7,6 +7,12 @@
   "name": "address-lookup",
   "main": "worker.ts",
   "compatibility_date": "2025-07-26",
+
+   // top-level defaults (prod)
+  "vars": {
+    "DEBUG_LOGS": "false",
+    "DEBUG_MODE": "false"
+  },
   
   "observability": {
     "enabled": true
@@ -20,6 +26,7 @@
       }
     },
     "test": {
+      "name": "address-lookup-test",
       "route": "api-test.lightspeed.co.uk/api/address-lookup/*",
       "vars": {
         "DEBUG_LOGS": "true",
@@ -28,9 +35,9 @@
       }
     },
     "production": {
+      "name": "address-lookup",
       "route": "api.lightspeed.co.uk/api/address-lookup/*",
       "vars": {
-        "DEBUG_MODE": "false",
         "EDGE_TTL_SECONDS": "864000" // 10 days
       }
     }

@@ -1,3 +1,4 @@
+/// <reference types="@cloudflare/workers-types" />
 /**
  * Cloudflare Worker: OS Places postcode proxy with classification filtering
  * -----------------------------------------------------------------------
@@ -16,11 +17,18 @@ export interface Env {
   EDGE_TTL_SECONDS?: string;    // so env.EDGE_TTL_SECONDS types cleanly
 }
 
+// Cloudflare Workers augment CacheStorage with a `default` cache. Some editors may
+// not pick this up unless the project tsconfig includes `@cloudflare/workers-types`.
+// This declaration augments the global type so `caches.default` type-checks.
+interface CFCacheStorage extends CacheStorage { default: Cache }
+declare const caches: CFCacheStorage;
+
 /*───────────────────────────────────────────────────────────────────────────
  * 1) Allow-list (embedded) + fast matchers
  *    - Wildcards use a trailing '*' (e.g. "CI*")
  *    - Exact codes are literals (e.g. "CC02")
  *    - Compiled once per isolate and reused
+ *    - the string will get a cache key, so it'll get busted if this list changes.
  *───────────────────────────────────────────────────────────────────────────*/
 
 const ALLOW_LIST: string[] = [
@@ -230,6 +238,7 @@ type SlimLPI = {
   ADMINISTRATIVE_AREA?: string;
   POSTCODE_LOCATOR?: string;
   CLASSIFICATION_CODE?: string;
+  CLASSIFICATION_CODE_DESCRIPTION?: string;
   LSB_PROPERTY_TYPE?: LSBType; //Add property type from Hossein's lookup
 };
 
@@ -244,6 +253,7 @@ type SlimDPA = {
   POST_TOWN?: string;
   POSTCODE?: string;
   CLASSIFICATION_CODE?: string;
+  CLASSIFICATION_CODE_DESCRIPTION?: string;
   LSB_PROPERTY_TYPE?: LSBType;   //Add property type from Hossein's lookup
 };
 
@@ -263,6 +273,7 @@ function projectLPI(lpi: any): SlimLPI {
     ADMINISTRATIVE_AREA: lpi.ADMINISTRATIVE_AREA,
     POSTCODE_LOCATOR: lpi.POSTCODE_LOCATOR,
     CLASSIFICATION_CODE: lpi.CLASSIFICATION_CODE,
+    CLASSIFICATION_CODE_DESCRIPTION: lpi.CLASSIFICATION_CODE_DESCRIPTION,
     LSB_PROPERTY_TYPE: _type //Add property type from Hossein's lookup
   };
 }
@@ -280,6 +291,7 @@ function projectDPA(dpa: any): SlimDPA {
     POST_TOWN: dpa.POST_TOWN,
     POSTCODE: dpa.POSTCODE,
     CLASSIFICATION_CODE: dpa.CLASSIFICATION_CODE,
+    CLASSIFICATION_CODE_DESCRIPTION: dpa.CLASSIFICATION_CODE_DESCRIPTION,
     LSB_PROPERTY_TYPE: _type //Add property type from Hossein's lookup
   };
 }
@@ -349,7 +361,8 @@ async function fetchWithTimeout(url: string, ms = 2500): Promise<Response> {
  *    - We filter classifications at the edge (no OR/wildcard pitfalls upstream)
  *───────────────────────────────────────────────────────────────────────────*/
 
-function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string, postalOnly: boolean): string {
+
+function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string): string {
   const u = new URL('https://api.os.uk/search/places/v1/postcode');
   u.searchParams.set('key', key);
   u.searchParams.set('postcode', pc);
@@ -359,9 +372,6 @@ function buildOsPlacesUrl(key: string, pc: string, dataset: string, max: string,
   // Quality filters (safe ANDs):
   u.searchParams.append('fq', 'LOGICAL_STATUS_CODE:1');
   if (dataset === 'LPI') u.searchParams.append('fq', 'LPI_LOGICAL_STATUS_CODE:1');
-
-  // Optional: only postal-ish rows when requested (D and L are postal)
-  if (dataset === 'LPI' && postalOnly) u.searchParams.append('fq', 'POSTAL_ADDRESS_CODE:(D L)');
 
   return u.toString();
 }
@@ -410,7 +420,6 @@ export default {
 
       const raw = url.searchParams.get('raw') === '1';
       const skipcache = url.searchParams.get('skipcache') === '1';
-      const postalOnly = url.searchParams.get('postal') === '1'; // optional upstream narrowing
 
       // Edge cache key derived from normalised inputs + allow-list hash
       const _allowHash = (() => {
@@ -453,8 +462,8 @@ export default {
 
       // 4c) Upstream call (no client headers forwarded)
       // Do not forward client headers to OS; perform a clean GET request
-      const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max, postalOnly);
-
+      //const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max, postalOnly);
+      const upstreamUrl = buildOsPlacesUrl(env.OS_PLACES_KEY, postcode, dataset, max);
       let res: Response | undefined;
       let upstreamText: string | undefined;
       let upstreamJson: any | undefined;
@@ -551,7 +560,7 @@ export default {
         return codeAllowed(rec?.CLASSIFICATION_CODE);
       });
 
-      // 4g) Project to slim shape to minimise payload size
+      // 4g) slim shape to minimise payload size
       let projected: Array<any>;
       if (dataset === 'LPI') {
         projected = filtered
